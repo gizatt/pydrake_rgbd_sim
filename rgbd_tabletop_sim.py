@@ -120,6 +120,15 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
         self.near_distance = 0.5
         self.far_distance = 2.0
 
+        # Cache these things that are used in every loop
+        # to minimize re-allocation of these big arrays
+        K = self.camera.depth_camera_info().intrinsic_matrix()
+        w = self.camera.depth_camera_info().width()
+        h = self.camera.depth_camera_info().height()
+        # How much does each depth point project laterally
+        # (in the axis of the camera-projector pair?)
+        self.x_indices_im = np.tile(np.arange(w), [h, 1])
+
     def _DoCalcAbstractOutput(self, context, y_data):
         u_data = self.EvalAbstractInput(context, 0).get_value()
         h, w, _ = u_data.data.shape
@@ -146,15 +155,13 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
         depth_image_out += depth_image
 
         if self.rgbd_projector_baseline > 0.0:
-            K = self.camera.depth_camera_info().intrinsic_matrix()
 
-            # How much does each depth point project laterally
-            # (in the axis of the camera-projector pair?)
-            x_indices_im = np.tile(np.arange(w), [h, 1])
-            x_projection = (x_indices_im - K[0, 2]) * depth_image / K[0, 0]
+            K = self.camera.depth_camera_info().intrinsic_matrix()
+            x_projection = (self.x_indices_im - K[0, 2]) * \
+                depth_image / K[0, 0]
 
             # For a fixed shift...
-            for shift_amt in range(-50, -5, 10):
+            for shift_amt in range(-50, 0, 1):
                 imshift_tf_matrix = np.array(
                     [[1., 0., shift_amt], [0., 1., 0.]])
                 sh_x_projection = cv2.warpAffine(
