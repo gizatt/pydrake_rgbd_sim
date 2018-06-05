@@ -12,8 +12,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libhdf5-dev \
       openmpi-bin \
       sudo \
+      graphviz \
+      python-pip \
+      curl \
+      python-tk \
+      xvfb \
+      mesa-utils \
+      libegl1-mesa \
+      libgl1-mesa-glx \
+      libglu1-mesa \
+      libx11-6 \
+      x11-common \
+      x11-xserver-utils \
       wget && \
     rm -rf /var/lib/apt/lists/*
+
+# Now get Drake and stuff
+ARG DRAKE_URL
+
+#RUN curl -o drake.tar.gz $DRAKE_URL && sudo tar -xzf drake.tar.gz -C /opt
+COPY drake_install/ /opt/drake
+RUN yes | sudo /opt/drake/share/drake/setup/install_prereqs
+RUN git clone https://github.com/RussTedrake/underactuated /underactuated
+RUN yes | sudo /underactuated/scripts/setup/ubuntu/16.04/install_prereqs
 
 # Install conda
 ENV CONDA_DIR /opt/conda
@@ -36,13 +57,15 @@ RUN useradd -m -s /bin/bash -N -u $NB_UID $NB_USER && \
 
 USER $NB_USER
 
-ARG python_version=3.6
+ARG python_version=2.7
 
 RUN conda install -y python=${python_version} && \
     pip install --upgrade pip && \
     pip install \
       sklearn_pandas \
-      tensorflow-gpu && \
+      tensorflow-gpu \
+      meshcat \
+      noise && \
     conda install \
       bcolz \
       h5py \
@@ -55,27 +78,19 @@ RUN conda install -y python=${python_version} && \
       pygpu \
       pyyaml \
       scikit-learn \
+      jupyter \
+      graphviz \
+      numpy \
+      scipy \
+      opencv \
+      matplotlib \
       six && \
     git clone git://github.com/keras-team/keras.git /src && pip install -e /src[tests] && \
     pip install git+git://github.com/keras-team/keras.git && \
     conda clean -yt
 
-ENV PYTHONPATH='/src/:$PYTHONPATH'
+ENV PYTHONPATH='/src/workspace/pydrake_rgbd_sim/DepthSim/python:/underactuated/src:/opt/drake/lib/python2.7/site-packages:/src/:$PYTHONPATH'
 
 WORKDIR /src
 
-EXPOSE 8888
-
-# Now get Drake and stuff
-ARG DRAKE_URL
-
-RUN sudo apt-get update
-RUN sudo apt install -y graphviz python-pip curl git
-RUN pip install --upgrade pip jupyter graphviz meshcat numpy scipy matplotlib
-RUN curl -o drake.tar.gz $DRAKE_URL && sudo tar -xzf drake.tar.gz -C /opt
-RUN yes | sudo /opt/drake/share/drake/setup/install_prereqs
-RUN git clone https://github.com/RussTedrake/underactuated /underactuated
-RUN yes | sudo /underactuated/scripts/setup/ubuntu/16.04/install_prereqs
-RUN apt install -y python-tk xvfb mesa-utils libegl1-mesa libgl1-mesa-glx libglu1-mesa libx11-6 x11-common x11-xserver-utils
-
-ENV PYTHONPATH=/underactuated/src:/opt/drake/lib/python2.7/site-packages
+EXPOSE 8888 6000 7000

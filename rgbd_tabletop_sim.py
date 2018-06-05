@@ -38,6 +38,7 @@ import meshcat
 import meshcat.transformations as tf
 import meshcat.geometry as g
 
+from RGBDCNN import network
 
 def setup_tabletop(rbt):
     table_sdf_path = os.path.join(
@@ -45,10 +46,20 @@ def setup_tabletop(rbt):
         "examples", "kuka_iiwa_arm", "models", "table",
         "extra_heavy_duty_table_surface_only_collision.sdf")
 
-    object_urdf_path = os.path.join(
-        pydrake.getDrakePath(),
-        "examples", "kuka_iiwa_arm", "models", "objects",
-        "block_for_pick_and_place.urdf")
+    object_urdf_paths = [
+        os.path.join(
+            pydrake.getDrakePath(),
+            "examples", "kuka_iiwa_arm", "models", "objects",
+            "block_for_pick_and_place.urdf"),
+        os.path.join(
+            pydrake.getDrakePath(),
+            "examples", "kuka_iiwa_arm", "models", "objects",
+            "big_robot_toy.urdf"),
+        os.path.join(
+            pydrake.getDrakePath(),
+            "examples", "kuka_iiwa_arm", "models", "objects",
+            "simple_cylinder.urdf")
+        ]
 
     AddFlatTerrainToWorld(rbt)
     table_frame_robot = RigidBodyFrame(
@@ -60,14 +71,6 @@ def setup_tabletop(rbt):
 
     table_top_z_in_world = 0.736 + 0.057 / 2
 
-    object_init_frame = RigidBodyFrame(
-        "object_init_frame", rbt.world(),
-        [0.0, 0, table_top_z_in_world+0.1],
-        [0, 0, 0])
-    AddModelInstanceFromUrdfFile(object_urdf_path,
-                                 FloatingBaseType.kRollPitchYaw,
-                                 object_init_frame, rbt)
-
     np.random.seed(42)
     for i in range(5):
         hp = (np.random.random(2)-0.5)*0.5
@@ -75,9 +78,10 @@ def setup_tabletop(rbt):
             "object_init_frame", rbt.world(),
             [hp[0], hp[1], table_top_z_in_world+0.15],
             np.random.random(3))
-        AddModelInstanceFromUrdfFile(object_urdf_path,
-                                     FloatingBaseType.kRollPitchYaw,
-                                     object_init_frame, rbt)
+        AddModelInstanceFromUrdfFile(
+            object_urdf_paths[i % len(object_urdf_paths)],
+            FloatingBaseType.kRollPitchYaw,
+            object_init_frame, rbt)
 
 
 class DepthImageCorruptionBlock(LeafSystem):
@@ -130,6 +134,7 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
         self.x_indices_im = np.tile(np.arange(w), [h, 1])
 
     def _DoCalcAbstractOutput(self, context, y_data):
+        start_time = time.time()
         u_data = self.EvalAbstractInput(context, 0).get_value()
         h, w, _ = u_data.data.shape
         depth_image = np.empty((h, w), dtype=np.float32)
@@ -196,6 +201,51 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
             np.zeros(depth_image.shape))
         y_data.get_mutable_value().mutable_data[:, :, 0] = \
             depth_image_out[:, :]
+        print "Elapsed in render (model): %f seconds" % \
+            (time.time() - start_time)
+
+
+class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
+    def __init__(self,
+                 camera):
+        DepthImageCorruptionBlock.__init__(self, camera)
+        self.set_name('depth image corruption, cnn')
+
+        self.model = network.load_trained_model(
+            weights_path="DepthSim/python/models/net_depth_seg_v2_aug.hdf5")
+
+        self.near_distance = 0.5
+        self.far_distance = 2.0
+        self.dropout_threshold = 0.5
+
+    def _DoCalcAbstractOutput(self, context, y_data):
+        start_time = time.time()
+        u_data = self.EvalAbstractInput(context, 0).get_value()
+        h, w, _ = u_data.data.shape
+        depth_image = np.empty((h, w), dtype=np.float64)
+        depth_image[:, :] = u_data.data[:, :, 0]
+        good_mask = np.isfinite(depth_image)
+        depth_image = np.clip(depth_image, self.near_distance,
+                              self.far_distance)
+
+        depth_image_resized = cv2.resize(
+            depth_image, (640, 480), interpolation=cv2.INTER_NEAREST)
+        stack = np.empty((1, 480, 640, 1))
+        stack[0, :, :, 0] = depth_image_resized[:, :]
+        predicted_prob_map = self.model.predict_on_batch(stack)
+        network.apply_mask(predicted_prob_map, depth_image_resized,
+                           self.dropout_threshold)
+
+        depth_image = cv2.resize(depth_image_resized, (w, h),
+                                 interpolation=cv2.INTER_NEAREST)
+        # Where it's infinite, set to 0
+        depth_image = np.where(
+            good_mask, depth_image,
+            np.zeros(depth_image.shape))
+        y_data.get_mutable_value().mutable_data[:, :, 0] = \
+            depth_image[:, :]
+        print "Elapsed in render (cnn): %f seconds" % \
+            (time.time() - start_time)
 
 
 class RgbdCameraMeshcatVisualizer(LeafSystem):
@@ -288,6 +338,10 @@ if __name__ == "__main__":
                         action="store_true",
                         help="Help out CI by launching a meshcat server for "
                              "the duration of the test.")
+    parser.add_argument("--corruption_method",
+                        type=str,
+                        default="cnn",
+                        help="[cnn, model, none]")
     args = parser.parse_args()
 
     meshcat_server_p = None
@@ -339,20 +393,32 @@ if __name__ == "__main__":
     camera = builder.AddSystem(
         RgbdCamera(name="camera", tree=rbt, frame=camera_frame,
                    z_near=0.5, z_far=2.0, fov_y=np.pi / 4,
-                   width=640, height=480,
+                   width=320, height=240,
                    show_window=False))
     builder.Connect(rbplant_sys.state_output_port(),
                     camera.get_input_port(0))
 
-    depth_corruptor = builder.AddSystem(
-        DepthImageHeuristicCorruptionBlock(camera))
-    builder.Connect(camera.depth_image_output_port(),
-                    depth_corruptor.depth_image_input_port)
+    if args.corruption_method == "model":
+        depth_corruptor = builder.AddSystem(
+            DepthImageHeuristicCorruptionBlock(camera))
+        builder.Connect(camera.depth_image_output_port(),
+                        depth_corruptor.depth_image_input_port)
+        final_depth_output_port = depth_corruptor.depth_image_output_port
+    elif args.corruption_method == "cnn":
+        depth_corruptor = builder.AddSystem(
+            DepthImageCNNCorruptionBlock(camera))
+        builder.Connect(camera.depth_image_output_port(),
+                        depth_corruptor.depth_image_input_port)
+        final_depth_output_port = depth_corruptor.depth_image_output_port
+    elif args.corruption_method == "none":
+        final_depth_output_port = camera.depth_image_output_port()
+    else:
+        print "Got invalid corruption method %s." % args.corruption_method
+        sys.exit(-1)
 
     camera_meshcat_visualizer = builder.AddSystem(
         RgbdCameraMeshcatVisualizer(camera, rbt))
-
-    builder.Connect(depth_corruptor.depth_image_output_port,
+    builder.Connect(final_depth_output_port,
                     camera_meshcat_visualizer.camera_input_port)
     builder.Connect(rbplant_sys.state_output_port(),
                     camera_meshcat_visualizer.state_input_port)
