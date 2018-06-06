@@ -8,13 +8,16 @@ import cv2
 from matplotlib import cm
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy as sp
 
 import pydrake
+from pydrake.solvers import ik
 from pydrake.all import (
     AbstractValue,
     AddFlatTerrainToWorld,
     AddModelInstancesFromSdfString,
     AddModelInstanceFromUrdfFile,
+    CompliantMaterial,
     DiagramBuilder,
     FloatingBaseType,
     Image,
@@ -40,6 +43,17 @@ import meshcat.geometry as g
 
 from RGBDCNN import network
 
+
+def save_image_uint16(name, im):
+    array_as_uint16 = im.astype(np.uint16)
+    sp.misc.imsave(name, im)
+
+
+def save_image_uint8(name, im):
+    array_as_uint8 = im.astype(np.uint8)
+    sp.misc.imsave(name, im)
+
+
 def setup_tabletop(rbt):
     table_sdf_path = os.path.join(
         pydrake.getDrakePath(),
@@ -58,7 +72,17 @@ def setup_tabletop(rbt):
         os.path.join(
             pydrake.getDrakePath(),
             "examples", "kuka_iiwa_arm", "models", "objects",
-            "simple_cylinder.urdf")
+            "simple_cylinder.urdf"),
+        os.path.join(
+            "models", "rlg_misc_models", "companion_cube.urdf"),
+        os.path.join(
+            "models", "rlg_misc_models", "apriltag_cube.urdf"),
+        os.path.join(
+            "models", "dish_models", "bowl_6p25in.urdf"),
+        os.path.join(
+            "models", "dish_models", "bowl_6p25in.urdf"),
+        os.path.join(
+            "models", "dish_models", "plate_11in.urdf"),
         ]
 
     AddFlatTerrainToWorld(rbt)
@@ -72,16 +96,38 @@ def setup_tabletop(rbt):
     table_top_z_in_world = 0.736 + 0.057 / 2
 
     np.random.seed(42)
-    for i in range(5):
-        hp = (np.random.random(2)-0.5)*0.5
+    for i in range(len(object_urdf_paths)):
+        hp = (np.random.random(2)-0.5)*0.25
         object_init_frame = RigidBodyFrame(
             "object_init_frame", rbt.world(),
-            [hp[0], hp[1], table_top_z_in_world+0.15],
+            [hp[0], hp[1], table_top_z_in_world+0.05],
             np.random.random(3))
         AddModelInstanceFromUrdfFile(
             object_urdf_paths[i % len(object_urdf_paths)],
             FloatingBaseType.kRollPitchYaw,
             object_init_frame, rbt)
+
+    rbt.compile()
+
+    # Project arrangement to nonpenetration with IK
+    constraints = []
+
+    constraints.append(ik.MinDistanceConstraint(
+        model=rbt, min_distance=0.01, active_bodies_idx=list(),
+        active_group_names=set()))
+
+    q0 = np.zeros(rbt.get_num_positions())
+    options = ik.IKoptions(rbt)
+    options.setDebug(True)
+    options.setMajorIterationsLimit(10000)
+    options.setIterationsLimit(100000)
+    results = ik.InverseKin(
+        rbt, q0, q0, constraints, options)
+
+    qf = results.q_sol[0]
+    info = results.info[0]
+    print "Projected with info %d" % info
+    return qf
 
 
 class DepthImageCorruptionBlock(LeafSystem):
@@ -212,11 +258,12 @@ class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
         self.set_name('depth image corruption, cnn')
 
         self.model = network.load_trained_model(
-            weights_path="DepthSim/python/models/net_depth_seg_v2_aug.hdf5")
+            weights_path="DepthSim/python/models/net_depth_seg_v1.hdf5")
 
-        self.near_distance = 0.5
-        self.far_distance = 2.0
-        self.dropout_threshold = 0.5
+        self.near_distance = 0.2
+        self.far_distance = 3.5
+        self.dropout_threshold = 0.1
+        self.iter = 0
 
     def _DoCalcAbstractOutput(self, context, y_data):
         start_time = time.time()
@@ -228,16 +275,27 @@ class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
         depth_image = np.clip(depth_image, self.near_distance,
                               self.far_distance)
 
+        depth_image_normalized = depth_image / self.far_distance
         depth_image_resized = cv2.resize(
-            depth_image, (640, 480), interpolation=cv2.INTER_NEAREST)
+            depth_image_normalized, (640, 480),
+            interpolation=cv2.INTER_NEAREST)
+        save_image_uint16("images/%d_input_depth.png" % self.iter,
+                          depth_image_resized*1000.)
         stack = np.empty((1, 480, 640, 1))
         stack[0, :, :, 0] = depth_image_resized[:, :]
         predicted_prob_map = self.model.predict_on_batch(stack)
-        network.apply_mask(predicted_prob_map, depth_image_resized,
-                           self.dropout_threshold)
-
-        depth_image = cv2.resize(depth_image_resized, (w, h),
-                                 interpolation=cv2.INTER_NEAREST)
+        save_image_uint8("images/%d_mask.png" % self.iter,
+                         predicted_prob_map[0, :, :, 0]*255)
+        #network.apply_mask(predicted_prob_map, depth_image_resized,
+        #                   self.dropout_threshold)
+        depth_image_resized = np.where(
+            predicted_prob_map[0, :, :, 0] <= self.dropout_threshold,
+            depth_image_resized,
+            np.zeros(depth_image_resized.shape))
+        save_image_uint16("images/%d_masked_depth.png" % self.iter,
+                          depth_image_resized*1000.)
+        depth_image = self.far_distance * cv2.resize(
+            depth_image_resized, (w, h), interpolation=cv2.INTER_NEAREST)
         # Where it's infinite, set to 0
         depth_image = np.where(
             good_mask, depth_image,
@@ -246,6 +304,7 @@ class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
             depth_image[:, :]
         print "Elapsed in render (cnn): %f seconds" % \
             (time.time() - start_time)
+        self.iter += 1
 
 
 class RgbdCameraMeshcatVisualizer(LeafSystem):
@@ -355,21 +414,21 @@ if __name__ == "__main__":
 
     # Construct the robot and its environment
     rbt = RigidBodyTree()
-    setup_tabletop(rbt)
+    q0 = setup_tabletop(rbt)
 
     # Set up a visualizer for the robot
     pbrv = MeshcatRigidBodyVisualizer(rbt, draw_timestep=0.01)
     # (wait while the visualizer warms up and loads in the models)
     time.sleep(2.0)
 
-    # Plan a robot motion to maneuver from the initial posture
-    # to a posture that we know should grab the object.
-    # (Grasp planning is left as an exercise :))
-    q0 = rbt.getZeroConfiguration()
-
     # Make our RBT into a plant for simulation
     rbplant = RigidBodyPlant(rbt)
     rbplant.set_name("Rigid Body Plant")
+    allmaterials = CompliantMaterial()
+    allmaterials.set_youngs_modulus(1E8)  # default 1E9
+    allmaterials.set_dissipation(1.0)     # default 0.32
+    allmaterials.set_friction(0.9)        # default 0.9.
+    rbplant.set_default_compliant_material(allmaterials)
 
     # Build up our simulation by spawning controllers and loggers
     # and connecting them to our plant.
@@ -392,8 +451,8 @@ if __name__ == "__main__":
     rbt.addFrame(camera_frame)
     camera = builder.AddSystem(
         RgbdCamera(name="camera", tree=rbt, frame=camera_frame,
-                   z_near=0.5, z_far=2.0, fov_y=np.pi / 4,
-                   width=320, height=240,
+                   z_near=0.2, z_far=3.5, fov_y=np.pi / 4,
+                   width=640, height=480,
                    show_window=False))
     builder.Connect(rbplant_sys.state_output_port(),
                     camera.get_input_port(0))
