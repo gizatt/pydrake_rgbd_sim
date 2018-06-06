@@ -54,6 +54,19 @@ def save_image_uint8(name, im):
     sp.misc.imsave(name, im)
 
 
+def save_image_colormap(name, im):
+    plt.imsave(name, im, cmap=plt.cm.inferno)
+
+
+def save_depth_colormap(name, im, near, far):
+    cmapped = plt.cm.jet((far - im)/(far - near))
+    zero_range_mask = im < near #np.repeat((im < near)[:, :, np.newaxis], 4, axis=2)
+    cmapped[:, :, 0][zero_range_mask] = 0.0
+    cmapped[:, :, 1][zero_range_mask] = 0.0
+    cmapped[:, :, 2][zero_range_mask] = 0.0
+    sp.misc.imsave(name, cmapped)
+
+
 def setup_tabletop(rbt):
     table_sdf_path = os.path.join(
         pydrake.getDrakePath(),
@@ -141,6 +154,10 @@ class DepthImageCorruptionBlock(LeafSystem):
             self._DeclareInputPort(PortDataType.kAbstractValued,
                                    camera.depth_image_output_port().size())
 
+        self.color_image_input_port = \
+            self._DeclareInputPort(PortDataType.kAbstractValued,
+                                   camera.color_image_output_port().size())
+
         self.depth_image_output_port = \
             self._DeclareAbstractOutputPort(
                 self._DoAllocDepthCameraImage,
@@ -165,10 +182,10 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
         self.set_name('depth image corruption, heuristic')
 
         self.rgbd_normal_limit = 0.5
-        self.rgbd_noise = 0.005
-        self.rgbd_projector_baseline = 0.2
-        self.near_distance = 0.5
-        self.far_distance = 2.0
+        self.rgbd_noise = 0.001
+        self.rgbd_projector_baseline = 0.05
+        self.near_distance = 0.2
+        self.far_distance = 3.5
 
         # Cache these things that are used in every loop
         # to minimize re-allocation of these big arrays
@@ -178,9 +195,18 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
         # How much does each depth point project laterally
         # (in the axis of the camera-projector pair?)
         self.x_indices_im = np.tile(np.arange(w), [h, 1])
+        self.iter = 0
 
     def _DoCalcAbstractOutput(self, context, y_data):
         start_time = time.time()
+
+        u_data = self.EvalAbstractInput(context, 1).get_value()
+        h, w, _ = u_data.data.shape
+        rgb_image = np.empty((h, w), dtype=np.float64)
+        rgb_image[:, :] = u_data.data[:, :, 0]
+        save_image_uint8("images/%05d_rgb.png" % self.iter,
+                         rgb_image)
+
         u_data = self.EvalAbstractInput(context, 0).get_value()
         h, w, _ = u_data.data.shape
         depth_image = np.empty((h, w), dtype=np.float32)
@@ -188,6 +214,10 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
         good_mask = np.isfinite(depth_image)
         depth_image = np.clip(depth_image, self.near_distance,
                               self.far_distance)
+
+        save_depth_colormap("images/%05d_input_depth.png" % self.iter,
+                            depth_image,
+                            self.near_distance, self.far_distance)
 
         # Calculate normals before adding noise
         if self.rgbd_normal_limit > 0.:
@@ -212,6 +242,7 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
                 depth_image / K[0, 0]
 
             # For a fixed shift...
+            mask = np.ones(depth_image_out.shape)
             for shift_amt in range(-50, 0, 1):
                 imshift_tf_matrix = np.array(
                     [[1., 0., shift_amt], [0., 1., 0.]])
@@ -235,7 +266,13 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
                 _, error_thresh = cv2.threshold(
                     error_im.astype(np.float32), 0., 1.,
                     cv2.THRESH_BINARY_INV)
-                depth_image_out *= error_thresh
+                mask *= error_thresh
+            depth_image_out *= mask
+            save_image_colormap("images/%05d_mask.png" % self.iter,
+                                mask)
+            save_depth_colormap("images/%05d_masked_depth.png" % self.iter,
+                                depth_image_out, self.near_distance,
+                                self.far_distance)
 
         # Apply normal limiting
         if self.rgbd_normal_limit > 0.:
@@ -249,7 +286,7 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
             depth_image_out[:, :]
         print "Elapsed in render (model): %f seconds" % \
             (time.time() - start_time)
-
+        self.iter += 1
 
 class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
     def __init__(self,
@@ -262,11 +299,19 @@ class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
 
         self.near_distance = 0.2
         self.far_distance = 3.5
-        self.dropout_threshold = 0.1
+        self.dropout_threshold = 0.15
         self.iter = 0
 
     def _DoCalcAbstractOutput(self, context, y_data):
         start_time = time.time()
+
+        u_data = self.EvalAbstractInput(context, 1).get_value()
+        h, w, _ = u_data.data.shape
+        rgb_image = np.empty((h, w), dtype=np.float64)
+        rgb_image[:, :] = u_data.data[:, :, 0]
+        save_image_uint8("images/%05d_rgb.png" % self.iter,
+                         rgb_image)
+
         u_data = self.EvalAbstractInput(context, 0).get_value()
         h, w, _ = u_data.data.shape
         depth_image = np.empty((h, w), dtype=np.float64)
@@ -279,23 +324,43 @@ class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
         depth_image_resized = cv2.resize(
             depth_image_normalized, (640, 480),
             interpolation=cv2.INTER_NEAREST)
-        save_image_uint16("images/%d_input_depth.png" % self.iter,
-                          depth_image_resized*1000.)
+        save_depth_colormap("images/%05d_input_depth.png" % self.iter,
+                            depth_image_resized,
+                            self.near_distance/self.far_distance, 1.0)
         stack = np.empty((1, 480, 640, 1))
         stack[0, :, :, 0] = depth_image_resized[:, :]
         predicted_prob_map = self.model.predict_on_batch(stack)
-        save_image_uint8("images/%d_mask.png" % self.iter,
-                         predicted_prob_map[0, :, :, 0]*255)
+        save_image_colormap("images/%05d_mask.png" % self.iter,
+                            predicted_prob_map[0, :, :, 0])
+
+        depth_image_resized[predicted_prob_map[0, :, :, 0] >
+                            self.dropout_threshold] = 0.
+        # Reason about low-probability dropout in superpixel-sized regions,
+        # since dropouts often occur on block level
+        #blocks_scale_factor = 8
+        #prob_map_maxpool = sp.ndimage.filters.maximum_filter(
+        #    predicted_prob_map[0, :, :, 0], size=blocks_scale_factor,
+        #    mode="nearest")
+        #dropouts_small = cv2.resize(
+        #    prob_map_maxpool,
+        #    (640 / blocks_scale_factor, 480 / blocks_scale_factor),
+        #    interpolation=cv2.INTER_NEAREST)
+        #noise_matrix = np.random.random(dropouts_small.shape)
+        #mask = cv2.resize(1.0*(dropouts_small > noise_matrix), (640, 480),
+        #                  interpolation=cv2.INTER_LINEAR)
+        #depth_image_resized[mask > 0.5] = 0.
+
+        #save_image_colormap("images/%05d_noise_matrix.png" % self.iter,
+        #                    mask)
         #network.apply_mask(predicted_prob_map, depth_image_resized,
         #                   self.dropout_threshold)
-        depth_image_resized = np.where(
-            predicted_prob_map[0, :, :, 0] <= self.dropout_threshold,
-            depth_image_resized,
-            np.zeros(depth_image_resized.shape))
-        save_image_uint16("images/%d_masked_depth.png" % self.iter,
-                          depth_image_resized*1000.)
-        depth_image = self.far_distance * cv2.resize(
-            depth_image_resized, (w, h), interpolation=cv2.INTER_NEAREST)
+        #depth_image_resized = np.where(
+        #    predicted_prob_map[0, :, :, 0] <= self.dropout_threshold,
+        #    depth_image_resized,
+        #    np.zeros(depth_image_resized.shape))
+        depth_image = self.far_distance * depth_image_resized
+        save_depth_colormap("images/%05d_masked_depth.png" % self.iter,
+                            depth_image, self.near_distance, self.far_distance)
         # Where it's infinite, set to 0
         depth_image = np.where(
             good_mask, depth_image,
@@ -392,7 +457,7 @@ if __name__ == "__main__":
     parser.add_argument("-T", "--duration",
                         type=float,
                         help="Duration to run sim.",
-                        default=1000.0)
+                        default=4.0)
     parser.add_argument("--test",
                         action="store_true",
                         help="Help out CI by launching a meshcat server for "
@@ -460,12 +525,16 @@ if __name__ == "__main__":
     if args.corruption_method == "model":
         depth_corruptor = builder.AddSystem(
             DepthImageHeuristicCorruptionBlock(camera))
+        builder.Connect(camera.color_image_output_port(),
+                        depth_corruptor.color_image_input_port)
         builder.Connect(camera.depth_image_output_port(),
                         depth_corruptor.depth_image_input_port)
         final_depth_output_port = depth_corruptor.depth_image_output_port
     elif args.corruption_method == "cnn":
         depth_corruptor = builder.AddSystem(
             DepthImageCNNCorruptionBlock(camera))
+        builder.Connect(camera.color_image_output_port(),
+                        depth_corruptor.color_image_input_port)
         builder.Connect(camera.depth_image_output_port(),
                         depth_corruptor.depth_image_input_port)
         final_depth_output_port = depth_corruptor.depth_image_output_port
@@ -487,20 +556,21 @@ if __name__ == "__main__":
 
     # Create a simulator for it.
     simulator = Simulator(diagram)
-    simulator.Initialize()
-    simulator.set_target_realtime_rate(1.0)
-    # Simulator time steps will be very small, so don't
-    # force the rest of the system to update every single time.
-    simulator.set_publish_every_time_step(False)
 
     # The simulator simulates forward from a given Context,
     # so we adjust the simulator's initial Context to set up
     # the initial state.
     state = simulator.get_mutable_context().\
         get_mutable_continuous_state_vector()
-    initial_state = np.zeros(state.size())
-    initial_state[0:q0.shape[0]] = q0
-    state.SetFromVector(initial_state)
+    x0 = np.zeros(rbplant_sys.get_num_states())
+    x0[0:q0.shape[0]] = q0
+    state.SetFromVector(x0)
+
+    simulator.Initialize()
+    simulator.set_target_realtime_rate(1.0)
+    # Simulator time steps will be very small, so don't
+    # force the rest of the system to update every single time.
+    simulator.set_publish_every_time_step(False)
 
     # From iiwa_wsg_simulation.cc:
     # When using the default RK3 integrator, the simulation stops

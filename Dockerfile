@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libgl1-mesa-glx \
       libglu1-mesa \
       libx11-6 \
+      libav-tools \
+      imagemagick \
       x11-common \
       x11-xserver-utils \
       wget && \
