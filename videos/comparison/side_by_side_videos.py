@@ -1,6 +1,7 @@
 import os
 
 models = ["cnn",
+          "cnn_singlescene",
           "model_wnoise",
           "model_shadowing_and_normals"]
 video_names = ["rgb_plus_mask",

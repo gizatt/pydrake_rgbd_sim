@@ -194,6 +194,9 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
         # to minimize re-allocation of these big arrays
         K = self.camera.depth_camera_info().intrinsic_matrix()
         K_rgb = self.camera.color_camera_info().intrinsic_matrix()
+        print "POSES: ",
+        print self.camera.color_camera_optical_pose()
+        print self.camera.depth_camera_optical_pose()
         w = self.camera.depth_camera_info().width()
         h = self.camera.depth_camera_info().height()
         # How much does each depth point project laterally
@@ -315,7 +318,6 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
             for u in range(h):
                 for v in range(w):
                     if not np.isfinite(reprojected_uv[2, u*w+v]):
-                        #print "rejecting ", u, v, reprojected_uv[:, v*h+u]
                         continue
                     proj_vu = np.round(reprojected_uv[:, u*w+v]).astype(int)
                     if (proj_vu[0] >= 0 and proj_vu[0] < h and

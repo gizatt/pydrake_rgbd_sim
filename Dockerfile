@@ -91,7 +91,7 @@ RUN conda install -y python=${python_version} && \
     pip install git+git://github.com/keras-team/keras.git && \
     conda clean -yt
 
-ENV PYTHONPATH='/src/workspace/pydrake_rgbd_sim/DepthSim/python:/underactuated/src:/opt/drake/lib/python2.7/site-packages:/src/:$PYTHONPATH'
+ENV PYTHONPATH='/src/workspace/DepthSim/python:/underactuated/src:/opt/drake/lib/python2.7/site-packages:/src/:$PYTHONPATH'
 
 WORKDIR /src
 
