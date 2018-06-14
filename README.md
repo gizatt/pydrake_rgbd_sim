@@ -1,9 +1,9 @@
 Pydrake RGBD Simulation
 =================
 
-Uses Chris Sweeney's Keras/CNN-based depth noise learner (see submodule) to produce RGBD simulations of scenes.
+Uses the submitted Keras/CNN-based depth noise learner (see submodule) to produce RGBD simulations of scenes. The critical file for specifying the actual network architecture actual models is `DepthSim/python/RGBDCNN/network.py`.
 
-Significant reference to [this](https://github.com/keras-team/keras/tree/master/docker) Docker reference and [this](https://github.com/gizatt/drake_periscope_tutorial) Pydrake example. Those are better documented than this repo.
+Significant reference to [this](https://github.com/keras-team/keras/tree/master/docker) Docker reference and [this](https://github.com/gizatt/drake_periscope_tutorial) Pydrake example. Those are better documented than this repo for matters of Keras, Docker, and [Py]Drake.
 
 ## Gist of how to run this:
 
