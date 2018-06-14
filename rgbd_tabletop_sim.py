@@ -6,6 +6,7 @@ import random
 import time
 
 import cv2
+import imageio
 from matplotlib import cm
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,26 +14,34 @@ import scipy as sp
 
 import pydrake
 from pydrake.solvers import ik
+import pydrake.math as drakemath
 from pydrake.all import (
     AbstractValue,
     AddFlatTerrainToWorld,
     AddModelInstancesFromSdfString,
     AddModelInstanceFromUrdfFile,
+    BasicVector,
+    Box,
     CompliantMaterial,
     DiagramBuilder,
+    Expression,
     FloatingBaseType,
     Image,
     LeafSystem,
     PixelType,
     PortDataType,
     RgbdCamera,
+    RigidBody,
     RigidBodyFrame,
     RigidBodyPlant,
     RigidBodyTree,
+    RollPitchYawFloatingJoint,
     RungeKutta2Integrator,
     Shape,
     SignalLogger,
     Simulator,
+    Variable,
+    VisualElement
 )
 
 from underactuated.meshcat_rigid_body_visualizer import (
@@ -42,17 +51,15 @@ import meshcat
 import meshcat.transformations as tf
 import meshcat.geometry as g
 
-from RGBDCNN import network
-
 
 def save_image_uint16(name, im):
     array_as_uint16 = im.astype(np.uint16)
-    sp.misc.imsave(name, im)
+    imageio.imwrite(name, array_as_uint16)
 
 
 def save_image_uint8(name, im):
     array_as_uint8 = im.astype(np.uint8)
-    sp.misc.imsave(name, im)
+    imageio.imwrite(name, array_as_uint8)
 
 
 def save_image_colormap(name, im):
@@ -62,10 +69,10 @@ def save_image_colormap(name, im):
 def save_depth_colormap(name, im, near, far):
     cmapped = plt.cm.jet((far - im)/(far - near))
     zero_range_mask = im < near
-    cmapped[:, :, 0][zero_range_mask] = 0.0
-    cmapped[:, :, 1][zero_range_mask] = 0.0
-    cmapped[:, :, 2][zero_range_mask] = 0.0
-    sp.misc.imsave(name, cmapped)
+    cmapped[:, :, 0][zero_range_mask] = 0
+    cmapped[:, :, 1][zero_range_mask] = 0
+    cmapped[:, :, 2][zero_range_mask] = 0
+    imageio.imwrite(name, (cmapped*255.).astype(np.uint8))
 
 
 def setup_tabletop(rbt):
@@ -109,16 +116,40 @@ def setup_tabletop(rbt):
 
     table_top_z_in_world = 0.736 + 0.057 / 2
 
-    for i in range(len(object_urdf_paths)):
+    num_objects = np.random.randint(10)+1
+    for i in range(num_objects):
+        object_ind = np.random.randint(len(object_urdf_paths))
         hp = (np.random.random(2)-0.5)*0.25
         object_init_frame = RigidBodyFrame(
             "object_init_frame", rbt.world(),
             [hp[0], hp[1], table_top_z_in_world+0.05],
             np.random.random(3))
         AddModelInstanceFromUrdfFile(
-            object_urdf_paths[i % len(object_urdf_paths)],
+            object_urdf_paths[object_ind % len(object_urdf_paths)],
             FloatingBaseType.kRollPitchYaw,
             object_init_frame, rbt)
+
+    # Add camera geometry!
+    camera_link = RigidBody()
+    camera_link.set_name("camera_link")
+    camera_visual_element = VisualElement(
+        Box([0.1, 0.1, 0.1]),
+        np.eye(4), [1., 0., 1., 0.5])
+    camera_link.AddVisualElement(camera_visual_element)
+    # necessary so this last link isn't pruned by the rbt.compile() call
+    camera_link.set_spatial_inertia(np.eye(6))
+    camera_link.add_joint(
+        rbt.world(),
+        RollPitchYawFloatingJoint(
+            "camera_floating_base",
+            np.eye(4)))
+    rbt.add_rigid_body(camera_link)
+
+    # - Add frame for camera fixture.
+    camera_frame = RigidBodyFrame(
+        name="rgbd_camera_frame", body=camera_link,
+        xyz=[0.105, 0., 0.], rpy=[0., 0., 0.])
+    rbt.addFrame(camera_frame)
 
     rbt.compile()
 
@@ -128,6 +159,12 @@ def setup_tabletop(rbt):
     constraints.append(ik.MinDistanceConstraint(
         model=rbt, min_distance=0.01, active_bodies_idx=list(),
         active_group_names=set()))
+
+    for body_i in range(2, rbt.get_num_bodies()):
+        constraints.append(ik.WorldPositionConstraint(
+            model=rbt, body=body_i, pts=np.array([0., 0., 0.]),
+            lb=np.array([-0.5, -0.5, table_top_z_in_world]),
+            ub=np.array([0.5, 0.5, table_top_z_in_world+0.5])))
 
     q0 = np.zeros(rbt.get_num_positions())
     options = ik.IKoptions(rbt)
@@ -143,6 +180,33 @@ def setup_tabletop(rbt):
     return qf
 
 
+class CameraPoseInjectionBlock(LeafSystem):
+    def __init__(self, rbt, t_var, trajectory):
+        LeafSystem.__init__(self)
+        self.set_name('camera pose injection')
+        self.trajectory = trajectory
+        self.t_var = t
+
+        self.nq = rbt.get_num_positions()
+        self.nu = self.nq + rbt.get_num_velocities()
+
+        self.state_input_port = \
+            self._DeclareInputPort(PortDataType.kVectorValued,
+                                   self.nu)
+        self.state_output_port = \
+            self._DeclareVectorOutputPort(
+                    BasicVector(self.nu),
+                    self._DoCalcVectorOutput)
+
+    def _DoCalcVectorOutput(self, context, y_data):
+        y = y_data.get_mutable_value()
+        x = self.EvalVectorInput(
+            context, self.state_input_port.get_index()).get_value()
+        y[:] = x[:]
+        y[(self.nq-6):self.nq] = [tr.Evaluate(
+            {self.t_var: context.get_time()}) for tr in self.trajectory]
+
+
 class DepthImageCorruptionBlock(LeafSystem):
     def __init__(self, camera, save_dir):
         LeafSystem.__init__(self)
@@ -150,7 +214,7 @@ class DepthImageCorruptionBlock(LeafSystem):
         self.camera = camera
 
         self.save_dir = save_dir
-        if self.save_dir is not None:
+        if len(self.save_dir) > 0:
             os.system("rm -r %s" % self.save_dir)
             os.system("mkdir -p %s" % self.save_dir)
 
@@ -214,7 +278,7 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
         rgb_image = np.empty((h, w), dtype=np.float64)
         rgb_image[:, :] = u_data.data[:, :, 0]
 
-        if self.save_dir is not None:
+        if len(self.save_dir) > 0:
             save_image_uint8(
                 "%s/%05d_rgb.png" % (self.save_dir, self.iter), rgb_image)
 
@@ -226,7 +290,7 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
         depth_image = np.clip(depth_image, self.near_distance,
                               self.far_distance)
 
-        if self.save_dir is not None:
+        if len(self.save_dir) > 0:
             save_depth_colormap(
                 "%s/%05d_input_depth.png" % (self.save_dir, self.iter),
                 depth_image, self.near_distance, self.far_distance)
@@ -277,7 +341,7 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
                 mask *= error_thresh
             depth_image *= mask
 
-            if self.save_dir is not None:
+            if len(self.save_dir) > 0:
                 save_image_colormap(
                     "%s/%05d_mask.png" % (self.save_dir, self.iter), mask)
                 save_depth_colormap(
@@ -331,11 +395,12 @@ class DepthImageHeuristicCorruptionBlock(DepthImageCorruptionBlock):
         else:
             depth_image_out = depth_image
 
-        save_depth_colormap(
-            "%s/%05d_masked_depth.png" % (
-                self.save_dir, self.iter),
-            depth_image_out, self.near_distance,
-            self.far_distance)
+        if len(self.save_dir) > 0:
+            save_depth_colormap(
+                "%s/%05d_masked_depth.png" % (
+                    self.save_dir, self.iter),
+                depth_image_out, self.near_distance,
+                self.far_distance)
 
         # Where it's infinite, set to 0
         depth_image_out = np.where(
@@ -375,7 +440,7 @@ class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
         rgb_image = np.empty((h, w), dtype=np.float64)
         rgb_image[:, :] = u_data.data[:, :, 0]
 
-        if self.save_dir is not None:
+        if len(self.save_dir) > 0:
             save_image_uint8(
                 "%s/%05d_rgb.png" % (self.save_dir, self.iter), rgb_image)
 
@@ -392,12 +457,11 @@ class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
             depth_image_normalized, (640, 480),
             interpolation=cv2.INTER_NEAREST)
 
-
         stack = np.empty((1, 480, 640, 1))
         stack[0, :, :, 0] = depth_image_resized[:, :]
         predicted_prob_map = self.model.predict_on_batch(stack)
 
-        if self.save_dir is not None:
+        if len(self.save_dir) > 0:
             save_depth_colormap(
                 "%s/%05d_input_depth.png" % (self.save_dir, self.iter),
                 depth_image_resized, self.near_distance/self.far_distance, 1.0)
@@ -432,7 +496,7 @@ class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
         #    np.zeros(depth_image_resized.shape))
         depth_image = self.far_distance * depth_image_resized
 
-        if self.save_dir is not None:
+        if len(self.save_dir) > 0:
             save_depth_colormap(
                 "%s/%05d_masked_depth.png" % (self.save_dir, self.iter),
                 depth_image, self.near_distance, self.far_distance)
@@ -533,7 +597,7 @@ if __name__ == "__main__":
     parser.add_argument("-T", "--duration",
                         type=float,
                         help="Duration to run sim.",
-                        default=4.0)
+                        default=2.*np.pi)
     parser.add_argument("--test",
                         action="store_true",
                         help="Help out CI by launching a meshcat server for "
@@ -549,9 +613,12 @@ if __name__ == "__main__":
                              "including scene generation.")
     parser.add_argument("--save_dir",
                         type=str,
-                        default=None,
+                        default="",
                         help="Directory to save depth diagnostic images."
                              " If not specified, does not save images.")
+    parser.add_argument("--orbit",
+                        action="store_true",
+                        help="Orbit camera at 1 radian per second.")
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -591,24 +658,45 @@ if __name__ == "__main__":
     # placed into it.
     rbplant_sys = builder.AddSystem(rbplant)
 
+    # Hack a camera gantry together by corrupting the robot
+    # state being used to generate the camera image.
+    # TODO(gizatt) Replace this with a less silly way of
+    # writing a trajectory...
+    t = Variable("t")
+    if args.orbit is True:
+        traj = [drakemath.cos(t),
+                drakemath.sin(t),
+                Expression(1.3),
+                Expression(0.0),
+                Expression(0.5),
+                -np.pi + t]
+    else:
+        traj = [Expression(1.),
+                Expression(0.),
+                Expression(1.3),
+                Expression(0.0),
+                Expression(0.5),
+                Expression(-np.pi)]
+
+    pose_injector = builder.AddSystem(
+        CameraPoseInjectionBlock(rbt, t, traj))
+    builder.Connect(rbplant_sys.state_output_port(),
+                    pose_injector.state_input_port)
+
     # Hook up the visualizer we created earlier.
     visualizer = builder.AddSystem(pbrv)
-    builder.Connect(rbplant_sys.state_output_port(),
+    builder.Connect(pose_injector.state_output_port,
                     visualizer.get_input_port(0))
 
     # Add a camera, too, though no controller or estimator
     # will consume the output of it.
-    # - Add frame for camera fixture.
-    camera_frame = RigidBodyFrame(
-        name="rgbd camera frame", body=rbt.world(),
-        xyz=[1.0, 0., 1.25], rpy=[0., 0.5, -np.pi])
-    rbt.addFrame(camera_frame)
     camera = builder.AddSystem(
-        RgbdCamera(name="camera", tree=rbt, frame=camera_frame,
+        RgbdCamera(name="camera", tree=rbt,
+                   frame=rbt.findFrame("rgbd_camera_frame"),
                    z_near=0.2, z_far=3.5, fov_y=np.pi / 4,
                    width=640, height=480,
                    show_window=False))
-    builder.Connect(rbplant_sys.state_output_port(),
+    builder.Connect(pose_injector.state_output_port,
                     camera.get_input_port(0))
 
     if args.corruption_method == "model":
@@ -621,6 +709,10 @@ if __name__ == "__main__":
         final_depth_output_port = depth_corruptor.depth_image_output_port
     elif (args.corruption_method == "cnn" or
           args.corruption_method == "cnn_single_scene"):
+        camera.set_color_camera_optical_pose(
+            camera.depth_camera_optical_pose())
+
+        from RGBDCNN import network
         depth_corruptor = builder.AddSystem(
             DepthImageCNNCorruptionBlock(
                 camera, args.save_dir,
@@ -632,6 +724,8 @@ if __name__ == "__main__":
                         depth_corruptor.depth_image_input_port)
         final_depth_output_port = depth_corruptor.depth_image_output_port
     elif args.corruption_method == "none":
+        camera.set_color_camera_optical_pose(
+            camera.depth_camera_optical_pose())
         final_depth_output_port = camera.depth_image_output_port()
     else:
         print "Got invalid corruption method %s." % args.corruption_method
@@ -641,7 +735,7 @@ if __name__ == "__main__":
         RgbdCameraMeshcatVisualizer(camera, rbt))
     builder.Connect(final_depth_output_port,
                     camera_meshcat_visualizer.camera_input_port)
-    builder.Connect(rbplant_sys.state_output_port(),
+    builder.Connect(pose_injector.state_output_port,
                     camera_meshcat_visualizer.state_input_port)
 
     # Done!

@@ -67,6 +67,7 @@ RUN conda install -y python=${python_version} && \
       sklearn_pandas \
       tensorflow-gpu \
       meshcat \
+      imageio \
       noise && \
     conda install \
       bcolz \

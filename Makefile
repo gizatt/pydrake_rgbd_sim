@@ -10,7 +10,7 @@ CUDA_VERSION?=9.0
 CUDNN_VERSION?=7
 SRC?=$(shell dirname `pwd`)
 DRAKE_URL="https://drake-packages.csail.mit.edu/drake/nightly/drake-latest-xenial.tar.gz"
-IMAGE_NAME=gizatt/pydrake_rgbd_sim_keras:20180607
+IMAGE_NAME=gizatt/pydrake_rgbd_sim_keras:20180612
 
 build:
 	docker build -t gizatt/pydrake_rgbd_sim_keras --build-arg DRAKE_URL=$(DRAKE_URL) --build-arg python_version=$(PYTHON_VERSION) --build-arg cuda_version=$(CUDA_VERSION) --build-arg cudnn_version=$(CUDNN_VERSION) -f $(DOCKER_FILE) .
