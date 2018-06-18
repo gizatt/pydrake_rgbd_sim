@@ -10,14 +10,14 @@ CUDA_VERSION?=9.0
 CUDNN_VERSION?=7
 SRC?=$(shell dirname `pwd`)
 DRAKE_URL="https://drake-packages.csail.mit.edu/drake/nightly/drake-latest-xenial.tar.gz"
-IMAGE_NAME=gizatt/pydrake_rgbd_sim_keras:20180612
+IMAGE_NAME=notavailableinallareas/pydrake_rgbd_sim_keras:20180612
 
 build:
-	docker build -t gizatt/pydrake_rgbd_sim_keras --build-arg DRAKE_URL=$(DRAKE_URL) --build-arg python_version=$(PYTHON_VERSION) --build-arg cuda_version=$(CUDA_VERSION) --build-arg cudnn_version=$(CUDNN_VERSION) -f $(DOCKER_FILE) .
+	docker build -t notavailableinallareas/pydrake_rgbd_sim_keras --build-arg DRAKE_URL=$(DRAKE_URL) --build-arg python_version=$(PYTHON_VERSION) --build-arg cuda_version=$(CUDA_VERSION) --build-arg cudnn_version=$(CUDNN_VERSION) -f $(DOCKER_FILE) .
 
 publish: build
-	docker tag gizatt/pydrake_rgbd_sim_keras gizatt/pydrake_rgbd_sim_keras:`date +'%Y%m%d'`
-	docker push gizatt/pydrake_rgbd_sim_keras:`date +'%Y%m%d'`
+	docker tag notavailableinallareas/pydrake_rgbd_sim_keras notavailableinallareas/pydrake_rgbd_sim_keras:`date +'%Y%m%d'`
+	docker push notavailableinallareas/pydrake_rgbd_sim_keras:`date +'%Y%m%d'`
 
 bash:
 	xhost +local:root

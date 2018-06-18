@@ -660,7 +660,7 @@ if __name__ == "__main__":
 
     # Hack a camera gantry together by corrupting the robot
     # state being used to generate the camera image.
-    # TODO(gizatt) Replace this with a less silly way of
+    # TODO(anon) Replace this with a less silly way of
     # writing a trajectory...
     t = Variable("t")
     if args.orbit is True:
