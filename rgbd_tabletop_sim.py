@@ -429,7 +429,7 @@ class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
 
         self.near_distance = 0.2
         self.far_distance = 3.5
-        self.dropout_threshold = 0.15
+        self.dropout_threshold = 0.5
         self.iter = 0
 
     def _DoCalcAbstractOutput(self, context, y_data):
@@ -469,31 +469,8 @@ class DepthImageCNNCorruptionBlock(DepthImageCorruptionBlock):
                 "%s/%05d_mask.png" % (self.save_dir, self.iter),
                 predicted_prob_map[0, :, :, 0])
 
-        depth_image_resized[predicted_prob_map[0, :, :, 0] >
-                            self.dropout_threshold] = 0.
-        # Reason about low-probability dropout in superpixel-sized regions,
-        # since dropouts often occur on block level
-        #blocks_scale_factor = 8
-        #prob_map_maxpool = sp.ndimage.filters.maximum_filter(
-        #    predicted_prob_map[0, :, :, 0], size=blocks_scale_factor,
-        #    mode="nearest")
-        #dropouts_small = cv2.resize(
-        #    prob_map_maxpool,
-        #    (640 / blocks_scale_factor, 480 / blocks_scale_factor),
-        #    interpolation=cv2.INTER_NEAREST)
-        #noise_matrix = np.random.random(dropouts_small.shape)
-        #mask = cv2.resize(1.0*(dropouts_small > noise_matrix), (640, 480),
-        #                  interpolation=cv2.INTER_LINEAR)
-        #depth_image_resized[mask > 0.5] = 0.
-
-        #save_image_colormap("%s/%05d_noise_matrix.png" % (self.save_dir, self.iter),
-        #                    mask)
-        #network.apply_mask(predicted_prob_map, depth_image_resized,
-        #                   self.dropout_threshold)
-        #depth_image_resized = np.where(
-        #    predicted_prob_map[0, :, :, 0] <= self.dropout_threshold,
-        #    depth_image_resized,
-        #    np.zeros(depth_image_resized.shape))
+        network.apply_mask(
+            predicted_prob_map, depth_image_resized, self.dropout_threshold)
         depth_image = self.far_distance * depth_image_resized
 
         if len(self.save_dir) > 0:
