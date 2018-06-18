@@ -2,6 +2,7 @@
 avconv -framerate 30 -y -i $1/%05d_input_depth.png -c:v libx264 -profile:v high -crf 20 -pix_fmt yuv420p $1_input_depth.mp4
 avconv -framerate 30 -y -i $1/%05d_masked_depth.png -c:v libx264 -profile:v high -crf 20 -pix_fmt yuv420p $1_masked_depth.mp4
 avconv -framerate 30 -y -i $1/%05d_mask.png -c:v libx264 -profile:v high -crf 20 -pix_fmt yuv420p $1_mask.mp4
+avconv -framerate 30 -y -i $1/%05d_rgb.png -c:v libx264 -profile:v high -crf 20 -pix_fmt yuv420p $1_rgb.mp4
 rm -fr /tmp/image_tmp
 mkdir /tmp/image_tmp
 for filename in $1/*_rgb.png; do
